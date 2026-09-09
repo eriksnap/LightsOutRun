@@ -909,19 +909,34 @@
   restartFromPauseBtn.addEventListener('click', ()=>{ ensureAudio(); startGame(); });
   menuFromPauseBtn.addEventListener('click', quitToMenu);
 
-  // Leaderboard: shared across everyone when this runs as a Claude artifact
-  // (window.storage with shared=true). Falls back to this device only when
-  // that API isn't present, e.g. if the file is hosted standalone elsewhere.
+  // Leaderboard, three possible backends, picked automatically at runtime:
+  //  1) window.storage  - shared, only exists inside a Claude artifact preview
+  //  2) Supabase         - shared, works anywhere once you fill in the two
+  //                        values below (see setup notes after you create a
+  //                        free project at supabase.com):
+  //                          - create a table called "leaderboard" with columns
+  //                            name (text), score (int8)
+  //                          - enable Row Level Security, then add two policies:
+  //                            "allow insert" (INSERT, WITH CHECK: true)
+  //                            "allow select" (SELECT, USING: true)
+  //                          - paste your Project URL and anon public key below
+  //  3) localStorage     - this device only, used if neither above is set up
+  const SUPABASE_URL = 'https://fuhpepcdxplxmbshqtmn.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1aHBlcGNkeHBseG1ic2hxdG1uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5NjkwMjEsImV4cCI6MjEwNDU0NTAyMX0.N4OVHEbgfqHm0aYWvChDBZXmp5k-huZr6znXIHytylw';
+
   const LB_KEY = 'lor_leaderboard';
   const LB_LOCAL_KEY = 'lor_leaderboard_local';
-  function hasSharedStorage(){
-    return !!(window.storage && typeof window.storage.get === 'function');
+  function leaderboardBackend(){
+    if(window.storage && typeof window.storage.get === 'function') return 'claude';
+    if(SUPABASE_URL && SUPABASE_ANON_KEY) return 'supabase';
+    return 'local';
   }
   function escapeHtml(str){
     return String(str).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   }
   async function loadLeaderboard(){
-    if(hasSharedStorage()){
+    const backend = leaderboardBackend();
+    if(backend === 'claude'){
       try{
         const res = await window.storage.get(LB_KEY, true);
         return res && res.value ? JSON.parse(res.value) : [];
@@ -929,20 +944,32 @@
         return []; // key doesn't exist yet
       }
     }
+    if(backend === 'supabase'){
+      try{
+        const url = `${SUPABASE_URL}/rest/v1/leaderboard?select=name,score&order=score.desc&limit=10`;
+        const res = await fetch(url, {
+          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+        });
+        if(!res.ok) return [];
+        return await res.json();
+      }catch(e){ return []; }
+    }
     try{
       const raw = localStorage.getItem(LB_LOCAL_KEY);
       return raw ? JSON.parse(raw) : [];
     }catch(e){ return []; }
   }
   async function saveLeaderboard(list){
-    if(hasSharedStorage()){
+    // only used by the whole-blob backends (claude, local); supabase inserts
+    // one row per score directly in submitScore() instead
+    if(leaderboardBackend() === 'claude'){
       try{ await window.storage.set(LB_KEY, JSON.stringify(list), true); }catch(e){}
     } else {
       try{ localStorage.setItem(LB_LOCAL_KEY, JSON.stringify(list)); }catch(e){}
     }
   }
   function renderLeaderboard(list){
-    lbNote.textContent = hasSharedStorage() ? 'Shared leaderboard' : 'Scores on this device only';
+    lbNote.textContent = leaderboardBackend() === 'local' ? 'Scores on this device only' : 'Shared leaderboard';
     if(!list.length){
       lbList.innerHTML = '<div class="lbEmpty">No scores yet. Be the first.</div>';
       return;
@@ -965,12 +992,35 @@
     const name = (nameInput.value || '').trim().slice(0,12) || 'Player';
     submitScoreBtn.disabled = true;
     submitScoreBtn.textContent = 'Saving';
-    let list = await loadLeaderboard();
-    list.push({ name, score: Math.floor(score), ts: Date.now() });
-    list.sort((a,b)=> b.score - a.score);
-    list = list.slice(0, 10);
-    await saveLeaderboard(list);
-    submitScoreBtn.textContent = 'Saved';
+    const backend = leaderboardBackend();
+    let ok = true;
+    if(backend === 'supabase'){
+      try{
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/leaderboard`, {
+          method: 'POST',
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal'
+          },
+          body: JSON.stringify({ name, score: Math.floor(score) })
+        });
+        ok = res.ok;
+      }catch(e){ ok = false; }
+    } else {
+      let list = await loadLeaderboard();
+      list.push({ name, score: Math.floor(score), ts: Date.now() });
+      list.sort((a,b)=> b.score - a.score);
+      list = list.slice(0, 10);
+      await saveLeaderboard(list);
+    }
+    if(ok){
+      submitScoreBtn.textContent = 'Saved';
+    } else {
+      submitScoreBtn.textContent = 'Try again';
+      submitScoreBtn.disabled = false;
+    }
   }
   leaderboardBtnStart.addEventListener('click', openLeaderboard);
   leaderboardBtnOver.addEventListener('click', openLeaderboard);
